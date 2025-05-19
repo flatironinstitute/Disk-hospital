@@ -91,19 +91,24 @@ class DlcCase:
                 )
                 self.version_number += 1
 
-            cur.execute(
-                """
-                INSERT INTO dlc_case (
-                    case_id, hostname, state, block_dev, osd_id,
-                    ceph_cluster, crush_weight, mount,
-                    version_number, active, action, wait_reason
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO dlc_case (
+                        case_id, hostname, state, block_dev, osd_id,
+                        ceph_cluster, crush_weight, mount,
+                        version_number, active, action, wait_reason
+                    )
+                    VALUES (:case_id, :hostname, :state, :block_dev, :osd_id,
+                            :ceph_cluster, :crush_weight, :mount,
+                            :version_number, :active, :action, :wait_reason)
+                    """,
+                    asdict(self),
                 )
-                VALUES (:case_id, :hostname, :state, :block_dev, :osd_id,
-                        :ceph_cluster, :crush_weight, :mount,
-                        :version_number, :active, :action, :wait_reason)
-                """,
-                asdict(self),
-            )
+            except sqlite3.IntegrityError as e:
+                print("Disk hospital unable to save/update case due to an integrity error:", e)
+                exit(1)
+
 
     @staticmethod
     def load(case_id: int, version: Optional[int] = None) -> "DlcCase":
