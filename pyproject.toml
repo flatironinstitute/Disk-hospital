@@ -1,0 +1,10 @@
+[project]
+name = "dlc"
+version = "0.0.1"
+description = "Disk Lifecycle Case PoC"
+requires-python = ">=3.9"
+dependencies = ["tabulate"]
+
+[project.scripts]
+dlc = "dlc.cli:main"
+
