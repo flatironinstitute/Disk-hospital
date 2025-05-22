@@ -308,6 +308,8 @@ class DlcCase:
             #Then progress to state "RECOVERY_WAIT"
             #in ceph_common there is a class called CephState and there is a method called is_clean
             self.state = "RECOVERY_WAIT"
+            #state = cc.CephState()
+            #state.is_clean() returns True or False
             #
 
     # convenience
