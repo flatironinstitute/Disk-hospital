@@ -10,40 +10,47 @@ from pathlib import Path
 _DB_PATH = Path.home() / ".dlc" / "dlc.sqlite"
 _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+TABLE_NAME = "testing_table"
+HISTORY_TABLE = "history_testing_table"
 
-DDL = """
+DDL = f"""
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS dlc_case (
-    rowid            INTEGER PRIMARY KEY AUTOINCREMENT,
-    case_id          INTEGER NOT NULL,
-    hostname         TEXT NOT NULL,
-    state            TEXT NOT NULL,
-    block_dev        TEXT NOT NULL,
-    osd_id           INTEGER NOT NULL,
-    ceph_cluster     TEXT NOT NULL,
-    crush_weight     REAL NOT NULL,
-    mount            TEXT,
-    action           TEXT NOT NULL,
-    wait_reason      TEXT NOT NULL DEFAULT None,
-    version_number   INTEGER NOT NULL,
-    -- Store as RFC-3339 in UTC, filled by SQLite
-    version_date_time TEXT NOT NULL
-        DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+    case_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    hostname         TEXT NOT NULL DEFAULT None,
+    state            TEXT NOT NULL DEFAULT None,
+    block_dev        TEXT NOT NULL DEFAULT None,
+    osd_id           INTEGER NOT NULL DEFAULT -1,
+    cluster          TEXT NOT NULL DEFAULT None,
+    crush_weight     REAL DEFAULT -1.0,
+    mount            TEXT DEFAULT None,
+    action           TEXT DEFAULT None,
+    wait_reason      TEXT DEFAULT None,
     active           INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_hostdev
-    ON dlc_case(hostname, block_dev)
+    ON {TABLE_NAME}(hostname, block_dev)
     WHERE active = 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_osdcluster
-    ON dlc_case(osd_id, ceph_cluster)
+    ON {TABLE_NAME}(osd_id, cluster)
     WHERE active = 1;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_caseid_version
-    ON dlc_case(case_id, version_number);
-
+CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} (
+    case_id          INTEGER NOT NULL,
+    hostname         TEXT NOT NULL DEFAULT None,
+    state            TEXT NOT NULL DEFAULT None,
+    block_dev        TEXT NOT NULL DEFAULT None,
+    osd_id           INTEGER NOT NULL DEFAULT -1,
+    cluster          TEXT NOT NULL DEFAULT None,
+    crush_weight     REAL DEFAULT -1.0,
+    mount            TEXT DEFAULT None,
+    action           TEXT DEFAULT None,
+    wait_reason      TEXT DEFAULT None,
+    active           INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -64,3 +71,4 @@ def db_cursor():
     finally:
         conn.close()
 
+#_open_conn()
