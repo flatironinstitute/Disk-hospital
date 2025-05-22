@@ -16,13 +16,6 @@ class State(str, Enum):
 
     NEW = "NEW"
     NEW_DETAIL = "NEW-DETAIL"
-    DETECTED = "Issue detected"
-    INVESTIGATING = "Investigating"
-    TAKING_ACTION = "Taking action"
-    WAITING = "Waiting"
-    WITH_OPERATOR = "With operator"
-    CLOSED = "Closed"
-    CLOSED_RESOLVED = "Resolved"
 
 class Action(str, Enum):
     logging = "Logging info"
@@ -96,10 +89,11 @@ class DlcCase:
         return cur.fetchone()[0]
     """
 
-    def valid_case(self) -> bool:
+    def valid_case(self):
         id_and_cluster = 0
         disk_and_hostname = 0
-
+        
+        #Took cluster out and will put back when it is deemed appropriate
         #if self.osd_id and self.cluster and self.osd_id != "None" and self.osd_id >= 0 and self.cluster != "None":
         if self.osd_id and self.osd_id != "None" and self.osd_id >= 0:
             id_and_cluster += 1
@@ -127,13 +121,17 @@ class DlcCase:
 
         case = self
 
+        #This is a way to create a dictionary out of merged dictionaries. What this says is 'object_kwargs' is my end product (the dictionary object I will use later). So build me a dictionary called 'object_kwargs' out of merged unpacked dicts. Merge the key value pairs if the condition is true, otherwise merge an empty dictionary. 
         object_kwargs = {
                 **({"hostname": self.hostname} if valid_case == 1 or valid_case == 3 else {}),
                 **({"block_dev": self.block_dev} if valid_case == 1 or valid_case == 3 else {}),
                 **({"osd_id": self.osd_id} if valid_case == 2 or valid_case == 3 else {}),
                 #**({"cluster": self.cluster} if valid_case == 2 or valid_case == 3 else {}),
             }
-        
+        #Here we're asserting that the dict is non-empty. There are other sections of the code that do this implicitly but here we do it explicitly just in case something was missed.
+        assert object_kwargs
+
+        #Here we try to find the cluster name by looking under /etc/ceph/ceph_cluster
         cluster_name, _ = self._check_ceph_cluster()
 
         if cluster_name:
@@ -145,54 +143,65 @@ class DlcCase:
         hw = hwinv.HWInv()  
         OsdMap = cc.CephOsdMap(hw)
 
+        #Here we are iterating through the Osd Map and trying to find a matching CephOsd object
         for osd_id, osd_object in OsdMap.osd_map_local.items():
-            osd_dict = {}
-            osd_dict['hostname'] = osd_object.hostname
-            osd_dict['block_dev'] = osd_object.dev_name
-            osd_dict['osd_id'] = osd_id
-             
-            found_osd_equivalent = True
 
-            for key, value in object_kwargs.items():
-                if key != 'cluster':
-                    if value == osd_dict[key]:
-                        pass
-                    else:
-                        found_osd_equivalent = False
+            #all() https://docs.python.org/3/library/functions.html#all is a built-in function which expresses that all conditions must be met. Returns True or False and takes an iterable, equivalent to:
+            """
+            def all(iterable):
+                for element in iterable:
+                    if not element:
+                    return False
+                return True
+            """
+            #getattr(object, name, default) https://docs.python.org/3/library/functions.html#getattr Returns the value of the named attribute of an object. The name must be a string, if a default return value is not provided and the named attribute doesn't exist, an AttributeError is raised.
+            #So this says return True if ALL attribute values in CephOsd are equivalent to their corresponding dictionary values in object_kwargs, otherwise return False.
+            found_osd_equivalent = all(
+                getattr(osd_object, key) == value
+                for key, value in object_kwargs.items()
+                #Currently omitting cluster as CephOsd object doesn't include it but we can add it back
+                if key != 'cluster'
+            )
 
+            #Here we are instantiating a DlcCase object if we find an OSD in the local portion of the OSD Map. This needs to be changed so that we look at the whole map when the state is "NEW", and look at the local portion if the case is in any other state.
             if found_osd_equivalent:
                 print("Found an equivalent OSD in the local region of the OSD Map (This host).")
                 case = DlcCase(
                     case_id=None,
                     hostname=osd_object.hostname,
-                    #state="NEW-DETAILS",
                     block_dev=str(osd_object.dev_name),
                     osd_id=osd_id,
-                    cluster=str(osd_object.cluster_fsid),
+                    #cluster name from local host instead of cluster fsid from CephOsd
+                    cluster=cluster,
                     crush_weight=osd_object.crush_weight,
                     mount=osd_object.lv_name,
                     action="logging info",
                     wait_reason="None",
                     osd=osd_object
                 )
+                if case.state == "NEW":
+                    case.state="NEW-DETAILS"
                 break
 
+        #This may need to be changed. According to Andras' instructions, if a corresponding OSD object is not found then we should not create or update a case. There is a check for this condition in the 'save' method and that is why we return the value of 'found_osd_equivalent'.
         if found_osd_equivalent == False:
             case.osd = cc.CephOsd(case.osd_id)
         return case, found_osd_equivalent
 
+    #This validates the case by checking that osd_id is an int and is positive and that crush weight is positive.
     def _validate_case(self):
         _validate_positive_int(self.osd_id, "osd_id")
         if self.crush_weight < 0:
             raise ValueError("crush weight must be ≥ 0")
-
         return True
 
     #This * means that any arguments after it will not be positional and will be supplied as keyword arguments
-    def save(self, *, new_version: bool = False, force_save: bool = False) -> "DlcCase":
+    def save(self, *, new_version: bool = False, force_save: bool = False):
+
         case = self
 
         #if disk and hostname return value is 1, osd_id and cluster return value is 2. If all 4 are present, return value is 3
+        #I took out cluster from the list of available arguments for an operator, I can put this back when it is appropriate. For now, assuming that the cluster name is the same as that which is listed under the local /etc/ceph/ceph_cluster
         valid_case = self.valid_case()
 
         if valid_case:
@@ -202,11 +211,9 @@ class DlcCase:
             sys.exit(1)
 
         #if self.state == "NEW" and found_osd_equivalent:
-        if self.state == "NEW":
-            case, found_osd_equivalent = self.get_complete_information(valid_case)
-            case.state = "NEW-DETAILS"
-        else:
-            _ , found_osd_equivalent = self.get_complete_information(valid_case)
+        case, found_osd_equivalent = self.get_complete_information(valid_case)
+        #case.state = "NEW-DETAILS"
+        #_ , found_osd_equivalent = self.get_complete_information(valid_case)
 
         try:
             self._validate_case()
@@ -299,6 +306,7 @@ class DlcCase:
             
             #ceph_admin.osd_remove already has all the commands but doesn't wait for cluster health after taking the OSD out. So, need to either rewrite that code or just paste parts of it here.
             #Then progress to state "RECOVERY_WAIT"
+            #in ceph_common there is a class called CephState and there is a method called is_clean
             self.state = "RECOVERY_WAIT"
             #
 
