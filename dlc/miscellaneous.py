@@ -1,4 +1,4 @@
-from .storage import db_cursor
+from storage import db_cursor
 
 TABLE_NAME = "testing_table"
 HISTORY_TABLE = "history_testing_table"

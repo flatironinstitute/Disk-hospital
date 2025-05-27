@@ -1,8 +1,8 @@
 import argparse, json, sys
-from tabulate import tabulate   # pip install tabulate for nice tables
-from .models import DlcCase, State, Action, WaitReason
+from models import DlcCase, State, Action, WaitReason
 import sqlite3
-
+#This import is from ceph-util
+import tabular
 TABLE_NAME = "testing_table"
 
 
@@ -93,20 +93,26 @@ def _cmd_update(ns):
     print(f"{action} case {updated_case.case_id}")
 
 
-from .storage import db_cursor
+from storage import db_cursor
 
 
 def _cmd_list(ns):
     with db_cursor() as cur:
         sql = f"SELECT * FROM {TABLE_NAME}"
         cur.execute(sql)
-        rows = [tuple(r) for r in cur.fetchall()]
-        if not rows:
-            print("No cases.")
-            return
+        #Here I'm fetching the rows
+        sql_rows = cur.fetchall()
+        #Here I'm grabbing the headers
         headers = [d[0] for d in cur.description]
-        print(tabulate(rows, headers=headers, tablefmt="simple"))
 
+        #Here I'm creating a list of DlcCase objects and using dictionary unpacking to instantiate the objects. I'm doing this in order to reuse the methods in ceph-util.tabular 
+        cases = [DlcCase(**dict(row)) for row in sql_rows]
+
+        schema = []
+        for header in headers:
+            schema.append({'name': header, 'value': lambda x, attr=header: getattr(x, attr), })
+
+        tabular.format_tabular(schema, cases, align = 'right', indent=0)
 
 if __name__ == "__main__":  # so `python -m dlc.cli` works
     main()

@@ -2,10 +2,10 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 from typing import Optional
 import sys
-from .storage import db_cursor
+from storage import db_cursor
 import ceph_common as cc
 import hwinv
-from .miscellaneous import save_case_history
+from miscellaneous import save_case_history
 #import pickle
 
 TABLE_NAME = "testing_table"
