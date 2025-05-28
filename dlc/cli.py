@@ -20,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     # ------------- update ----------
     upd = sp.add_parser("update", help="update or new version")
     upd.add_argument("case_id", type=int)
-    upd.add_argument("--new-version", action="store_true")
+    #upd.add_argument("--new-version", action="store_true")
     _common_args(upd, require_any=True)
 
     #add a subcommand for listing cases
@@ -63,20 +63,20 @@ def _cmd_new(ns):
 
     case_kwargs = {
             **({"hostname": ns.hostname} if ns.hostname is not None else {}),
-            **({"state": "NEW"}),  # always present
+            **({"state": State["NEW"]}),  # always present
             **({"block_dev": ns.block_dev} if ns.block_dev is not None else {}),
             **({"osd_id": ns.osd_id} if ns.osd_id is not None else {}),
             #**({"cluster": ns.cluster} if ns.cluster is not None else {}),
     }
     case = DlcCase(**case_kwargs)
-    try:
-        saved_case = case.save(force_save = ns.force_save)
-    except sqlite3.IntegrityError as e:
-        print(e)
-        sys.exit(1)
+    #try:
+        #saved_case = case.save(force_save = ns.force_save)
+    #except sqlite3.IntegrityError as e:
+    #    print(e)
+    #    sys.exit(1)
 
-    if saved_case:
-        print(f"Created case {saved_case.case_id}")
+    #if saved_case:
+    #    print(f"Created case {saved_case.case_id}")
 
 
 def _cmd_update(ns):
@@ -86,11 +86,16 @@ def _cmd_update(ns):
         print(exc)
         sys.exit(1)
 
-    case.progress()
-    updated_case = case.save(new_version=ns.new_version)
+    #For now assuming new_version is True for updates via the cmd line
+    #updated_case = case.save(new_version=ns.new_version)
+    updated_case = case.progress(new_version = True)
+    #updated_case = case.save(new_version=True)
 
-    action = "Updated"
-    print(f"{action} case {updated_case.case_id}")
+    if updated_case:
+        action = "Updated"
+        print(f"{action} case {updated_case.case_id}")
+    else:
+        print("Case is NoneType, if not testing then something went wrong...")
 
 
 from storage import db_cursor

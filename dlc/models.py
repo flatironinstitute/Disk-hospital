@@ -3,9 +3,13 @@ from enum import Enum
 from typing import Optional
 import sys
 from storage import db_cursor
+#ceph-util import
 import ceph_common as cc
+#ceph-util import
+import ceph_admin as cadmin
 import hwinv
 from miscellaneous import save_case_history
+import sqlite3
 
 TABLE_NAME = "testing_table"
 
@@ -14,7 +18,7 @@ class State(str, Enum):
     #There should be a case state plus an action for any one point in time.
 
     NEW = "NEW" 
-    NEW_DETAIL = "NEW-DETAIL"
+    NEW_DETAIL = "NEW-DETAILS"
     RECOVERY_WAIT = "RECOVERY-WAIT"
     RECOVERY_DONE = "RECOVERY-DONE"
     OSD_REMOVED = "OSD-REMOVED"
@@ -24,7 +28,7 @@ class State(str, Enum):
     WAIT_FOR_REPLACE = "WAIT-FOR_REPLACE"
     REBUILD_OSD = "REBUILD-OSD"
     RESOLVED = "RESOLVED"
-    FAILED = "FAILED"
+    OPERATOR_NEEDED = "OPERATOR-NEEDED"
 
 class Action(str, Enum):
     logging = "Logging info"
@@ -35,13 +39,13 @@ class Action(str, Enum):
     operator_handoff = "Handing to operator"
     removing_OSD = "Removing OSD"
     reweighting_OSD = "Reweighting OSD"
-    none = "None"
+    none = None
 
 class WaitReason(str, Enum):
     cluster_health = "Waiting for 'HEALTH_OK'"
     disk_test_completion = "Waiting for disk test to finish"
     disk_replacement_completion = "Waiting for disk replacement"
-    none = "None"
+    none = None
 
 def _validate_positive_int(value: int, name: str):
     if not isinstance(value, int) or value < 0:
@@ -53,15 +57,15 @@ class DlcCase:
     def __init__(
             self,
             case_id: Optional[int] = None,
-            hostname: Optional[str] = "None",
-            state: State = "NEW",
-            action: Optional[Action] = "None",
-            wait_reason: Optional[WaitReason] = "None",
-            block_dev: str = "None",
+            hostname: Optional[str] = None,
+            state: State = State["NEW"],
+            action: Optional[Action] = None,
+            wait_reason: Optional[WaitReason] = None,
+            block_dev: Optional[str] = None,
             osd_id: int = -1,
-            cluster: str = "None",
+            cluster: Optional[str] = None,
             crush_weight: float = -1.0,
-            mount: str = "None",
+            mount: Optional[str] = None,
             active: int = 1, 
             osd: Optional[cc.CephOsd] = None,
             ):
@@ -92,9 +96,11 @@ class DlcCase:
                 State.TEST_DONE: {State.REPLACE_DRIVE, State.REBUILD_OSD, State.OPERATOR_NEEDED},
                 State.RESOLVED: set(),
                 }
+        
+        self._post_init()
 
     # ---------- validation ----------
-    def __post_init__(self):
+    def _post_init(self):
         if not isinstance(self.state, State):
             # argparse passes strings → cast
             try:
@@ -103,10 +109,16 @@ class DlcCase:
                 raise ValueError(
                     f"state must be one of {[s.value for s in State]}"
                 ) from e
-        
-        elif self.state == "NEW":
-            self.save(force_save = True)
-
+       
+        elif self.state == State.NEW:
+            try:
+                self.save(force_save = True)
+            except sqlite3.IntegrityError as e:
+                print(self.block_dev, self.hostname)
+                print(e)
+                sys.exit(1)
+            
+            print("New case saved.")
 
 
     def transition_to(self, new_state: State):
@@ -135,10 +147,10 @@ class DlcCase:
         disk_and_hostname = 0
         
         #Took cluster out and will put back when it is deemed appropriate
-        #if self.osd_id and self.cluster and self.osd_id != "None" and self.osd_id >= 0 and self.cluster != "None":
-        if self.osd_id and self.osd_id != "None" and self.osd_id >= 0:
+        #if self.osd_id and self.cluster and self.osd_id >= 0:
+        if self.osd_id and self.osd_id >= 0:
             id_and_cluster += 1
-        if self.hostname and self.block_dev and self.hostname != "None" and self.block_dev != "None":
+        if self.hostname and self.block_dev:
             disk_and_hostname += 1
         
         if disk_and_hostname < 1 and id_and_cluster < 1:
@@ -165,21 +177,13 @@ class DlcCase:
         #This is a way to create a dictionary out of merged dictionaries. What this says is 'object_kwargs' is my end product (the dictionary object I will use later). So build me a dictionary called 'object_kwargs' out of merged unpacked dicts. Merge the key value pairs if the condition is true, otherwise merge an empty dictionary. 
         object_kwargs = {
                 **({"hostname": self.hostname} if valid_case == 1 or valid_case == 3 else {}),
-                **({"block_dev": self.block_dev} if valid_case == 1 or valid_case == 3 else {}),
+                **({"dev_name": self.block_dev} if valid_case == 1 or valid_case == 3 else {}),
                 **({"osd_id": self.osd_id} if valid_case == 2 or valid_case == 3 else {}),
                 #**({"cluster": self.cluster} if valid_case == 2 or valid_case == 3 else {}),
             }
         #Here we're asserting that the dict is non-empty. There are other sections of the code that do this implicitly but here we do it explicitly just in case something was missed.
         assert object_kwargs
 
-        #Here we try to find the cluster name by looking under /etc/ceph/ceph_cluster
-        cluster_name, _ = self._check_ceph_cluster()
-
-        if cluster_name:
-            pass
-        else:
-            print("Failed to get ceph cluster name... Exiting.")
-            exit(1)
 
         hw = hwinv.HWInv()  
         OsdMap = cc.CephOsdMap(hw)
@@ -217,11 +221,11 @@ class DlcCase:
                 self.block_dev=str(osd_object.dev_name)
                 self.osd_id=int(osd_object.osd_id)
                 #cluster name from local host instead of cluster fsid from CephOsd
-                self.cluster=cluster_name
+                #self.cluster=cluster_name
                 self.crush_weight=float(osd_object.crush_weight)
                 self.mount=str(osd_object.lv_name)
                 #action="logging info"
-                #wait_reason="None"
+                #wait_reason=None
                 self.osd=osd_object
 
                 break
@@ -251,6 +255,15 @@ class DlcCase:
         else:
             print("In order to save a case you must provide either an osd id or a block device AND hostname. Exiting...")
             sys.exit(1)
+
+        #Here we try to find the cluster name by looking under /etc/ceph/ceph_cluster
+        cluster_name, e = self._check_ceph_cluster()
+
+        if cluster_name:
+            self.cluster = cluster_name
+        else:
+            print(e)
+            exit(1)
 
         if not force_save:
             #if disk and hostname return value is 1, osd_id and cluster return value is 2. If all 4 are present, return value is 3
@@ -330,10 +343,32 @@ class DlcCase:
             #print(DlcCase)
             return DlcCase(**row_dict)
 
-    def progress(self):
+    def progress(self, *, new_version = True) -> "DlcCase":
 
-        if self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
-            case, found_osd_equivalent = self.get_complete_information(3)
+        if self.state == State.RECOVERY_DONE:
+            print("Recovery is done, moving to osd removal testing...")
+            found_osd_equivalent = self.get_complete_information(self.valid_case())
+            class args:
+                def __init__( self,
+                        replace = True,
+                        dry_run = True,
+                        keep_vg = True,
+                        confirm_commands = True,
+                        disk_lost = False,
+                        ):
+                    self.replace = replace
+                    self.dry_run = dry_run
+                    self.keep_vg = keep_vg
+                    self.confirm_commands = confirm_commands
+                    self.disk_lost = disk_lost
+
+            args = args()
+            #print(args.dry_run)
+
+            cadmin.osd_remove(self.osd, args) 
+            return None
+        elif self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
+            found_osd_equivalent = self.get_complete_information(self.valid_case())
             #Do some operations depending on the state. For example, for self.state == State.RECOVERY_DONE:
             #Check OSD properties... if it seems like a normal OSD found_osd_equivalent == True
             #Then we're going to do things like:
@@ -362,8 +397,12 @@ class DlcCase:
                 if state != State.OPERATOR_NEEDED:
                     self.transition_to(state)
                 
-            #Otherwise, if something went wrong:
-            self.transition_to(State.OPERATOR_NEEDED)
+            return_this_case = self.save(new_version)
+            #Otherwise, if something went wrong (for now assuming everything is right):
+            #self.transition_to(State.OPERATOR_NEEDED)
+            return return_this_case
+        else:
+            return None
 
                 
 

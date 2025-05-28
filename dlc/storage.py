@@ -18,15 +18,15 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     case_id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    hostname         TEXT NOT NULL DEFAULT None,
-    state            TEXT NOT NULL DEFAULT None,
-    block_dev        TEXT NOT NULL DEFAULT None,
-    osd_id           INTEGER NOT NULL DEFAULT -1,
-    cluster          TEXT NOT NULL DEFAULT None,
+    hostname         TEXT DEFAULT NULL,
+    state            TEXT NOT NULL,
+    block_dev        TEXT DEFAULT NULL,
+    osd_id           INTEGER DEFAULT NULL,
+    cluster          TEXT DEFAULT NULL,
     crush_weight     REAL DEFAULT -1.0,
-    mount            TEXT DEFAULT None,
-    action           TEXT DEFAULT None,
-    wait_reason      TEXT DEFAULT None,
+    mount            TEXT DEFAULT NULL,
+    action           TEXT DEFAULT NULL,
+    wait_reason      TEXT DEFAULT NULL,
     active           INTEGER NOT NULL DEFAULT 1
 );
 
@@ -40,15 +40,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_osdcluster
 
 CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} (
     case_id          INTEGER NOT NULL,
-    hostname         TEXT NOT NULL DEFAULT None,
-    state            TEXT NOT NULL DEFAULT None,
-    block_dev        TEXT NOT NULL DEFAULT None,
-    osd_id           INTEGER NOT NULL DEFAULT -1,
-    cluster          TEXT NOT NULL DEFAULT None,
+    hostname         TEXT DEFAULT None,
+    state            TEXT NOT NULL,
+    block_dev        TEXT DEFAULT NULL,
+    osd_id           INTEGER DEFAULT NULL,
+    cluster          TEXT DEFAULT NULL,
     crush_weight     REAL DEFAULT -1.0,
-    mount            TEXT DEFAULT None,
-    action           TEXT DEFAULT None,
-    wait_reason      TEXT DEFAULT None,
+    mount            TEXT DEFAULT NULL,
+    action           TEXT DEFAULT NULL,
+    wait_reason      TEXT DEFAULT NULL,
     active           INTEGER NOT NULL DEFAULT 1
 );
 """
