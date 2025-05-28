@@ -8,7 +8,7 @@ TABLE_NAME = "testing_table"
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dlc")
-    #dest is for naming the attribute by which subcommands can be accessed. 'required' is to indicate that a subcommand must be provided
+    #dest is for naming the attribute by which the subcommands can be accessed (ArgumentParser.cmd = "new", "update", or "list"). 'required' is to indicate that a subcommand must be provided
     sp = p.add_subparsers(dest="cmd", required=True)
 
     #add a subcommand for new cases
@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     lst.add_argument("--all", action="store_true", help="include inactive versions")
     return p
 
-
+#Need to clean this up. The 'new' subcommand shouldn't need this many args, neither should update. Should all these be taken away for standard 'new' and 'update' calls and used for special cases? Not sure yet.
 #This method adds common arguments for each subcommand (currently 'new', 'update', 'list') 05162025
 def _common_args(pp: argparse.ArgumentParser, *, require_any=False):
     req = pp.add_argument if not require_any else pp.add_argument

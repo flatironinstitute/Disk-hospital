@@ -6,7 +6,6 @@ from storage import db_cursor
 import ceph_common as cc
 import hwinv
 from miscellaneous import save_case_history
-#import pickle
 
 TABLE_NAME = "testing_table"
 
@@ -14,8 +13,18 @@ class State(str, Enum):
     #OSD failure -> Log failure into database -> start resolution 'Change OSD/disk attributes' (CRUSH weight, etc.) -> wait ceph health (totally clean) -> re-check OSD/disk attributes (OSD reweighted, disk not missing, etc.) -> remove OSD (osd-remove --replace) -> check failure type (IO error?) -> check smartctl -> test disk? -> test results...
     #There should be a case state plus an action for any one point in time.
 
-    NEW = "NEW"
+    NEW = "NEW" 
     NEW_DETAIL = "NEW-DETAIL"
+    RECOVERY_WAIT = "RECOVERY-WAIT"
+    RECOVERY_DONE = "RECOVERY-DONE"
+    OSD_REMOVED = "OSD-REMOVED"
+    DRIVE_TESTING = "DRIVE-TESTING"
+    TEST_DONE = "TEST-DONE"
+    REPLACE_DRIVE = "REPLACE-DRIVE"
+    WAIT_FOR_REPLACE = "WAIT-FOR_REPLACE"
+    REBUILD_OSD = "REBUILD-OSD"
+    RESOLVED = "RESOLVED"
+    FAILED = "FAILED"
 
 class Action(str, Enum):
     logging = "Logging info"
@@ -45,7 +54,7 @@ class DlcCase:
             self,
             case_id: Optional[int] = None,
             hostname: Optional[str] = "None",
-            state: Optional[State] = "NEW",
+            state: State = "NEW",
             action: Optional[Action] = "None",
             wait_reason: Optional[WaitReason] = "None",
             block_dev: str = "None",
@@ -69,6 +78,21 @@ class DlcCase:
         self.active = active
         self.osd = osd
 
+        #Dict for valid transitions
+        self.valid_transitions = {
+                State.NEW: {State.NEW_DETAIL, State.OPERATOR_NEEDED},
+                State.NEW_DETAIL: {State.RECOVERY_WAIT, State.OPERATOR_NEEDED},
+                State.RECOVERY_WAIT: {State.RECOVERY_DONE, State.OPERATOR_NEEDED},
+                State.RECOVERY_DONE: {State.OSD_REMOVED, State.OPERATOR_NEEDED},
+                State.OSD_REMOVED: {State.DRIVE_TESTING, State.REPLACE_DRIVE, State.OPERATOR_NEEDED},
+                State.REPLACE_DRIVE: {State.WAIT_FOR_REPLACE,  State.OPERATOR_NEEDED},
+                State.WAIT_FOR_REPLACE: {State.REBUILD_OSD, State.OPERATOR_NEEDED},
+                State.REBUILD_OSD: {State.RESOLVED, State.OPERATOR_NEEDED},
+                State.DRIVE_TESTING: {State.TEST_DONE, State.OPERATOR_NEEDED},
+                State.TEST_DONE: {State.REPLACE_DRIVE, State.REBUILD_OSD, State.OPERATOR_NEEDED},
+                State.RESOLVED: set(),
+                }
+
     # ---------- validation ----------
     def __post_init__(self):
         if not isinstance(self.state, State):
@@ -79,8 +103,25 @@ class DlcCase:
                 raise ValueError(
                     f"state must be one of {[s.value for s in State]}"
                 ) from e
+        
+        elif self.state == "NEW":
+            self.save(force_save = True)
 
-    # ---------- DB helpers ----------
+
+
+    def transition_to(self, new_state: State):
+        if self.state == State.OPERATOR_NEEDED:
+            self.state = new_state
+            return
+
+        if new_state in self.valid_transitions[self.state]:
+            self.state = new_state
+        else:
+            raise InvalidTransitionError(
+                    f"Case cannot transition from {self.state} to {new_state}"
+                    )
+
+# ---------- DB helpers ----------
     #This doesn't need an automatic argument such as self or cls. It's a standalone helper function that is here for organizational purposes. @staticmethod is an indicator that this is the case. The underscore at the beginning means that this is a private functions to be used only within the class
     """
     @staticmethod
@@ -119,7 +160,7 @@ class DlcCase:
 
     def get_complete_information(self, valid_case):
 
-        case = self
+        #case = self
 
         #This is a way to create a dictionary out of merged dictionaries. What this says is 'object_kwargs' is my end product (the dictionary object I will use later). So build me a dictionary called 'object_kwargs' out of merged unpacked dicts. Merge the key value pairs if the condition is true, otherwise merge an empty dictionary. 
         object_kwargs = {
@@ -143,8 +184,13 @@ class DlcCase:
         hw = hwinv.HWInv()  
         OsdMap = cc.CephOsdMap(hw)
 
+        if self.state == "NEW":
+            osd_map = OsdMap.osd_map
+        else:
+            osd_map = OsdMap.osd_map_local
+
         #Here we are iterating through the Osd Map and trying to find a matching CephOsd object
-        for osd_id, osd_object in OsdMap.osd_map_local.items():
+        for osd_id, osd_object in osd_map.items():
 
             #all() https://docs.python.org/3/library/functions.html#all is a built-in function which expresses that all conditions must be met. Returns True or False and takes an iterable, equivalent to:
             """
@@ -165,28 +211,27 @@ class DlcCase:
 
             #Here we are instantiating a DlcCase object if we find an OSD in the local portion of the OSD Map. This needs to be changed so that we look at the whole map when the state is "NEW", and look at the local portion if the case is in any other state.
             if found_osd_equivalent:
-                print("Found an equivalent OSD in the local region of the OSD Map (This host).")
-                case = DlcCase(
-                    case_id=None,
-                    hostname=osd_object.hostname,
-                    block_dev=str(osd_object.dev_name),
-                    osd_id=osd_id,
-                    #cluster name from local host instead of cluster fsid from CephOsd
-                    cluster=cluster,
-                    crush_weight=osd_object.crush_weight,
-                    mount=osd_object.lv_name,
-                    action="logging info",
-                    wait_reason="None",
-                    osd=osd_object
-                )
-                if case.state == "NEW":
-                    case.state="NEW-DETAILS"
+                print("Found an equivalent OSD in the OSD Map.")
+                
+                self.hostname=str(osd_object.hostname)
+                self.block_dev=str(osd_object.dev_name)
+                self.osd_id=int(osd_object.osd_id)
+                #cluster name from local host instead of cluster fsid from CephOsd
+                self.cluster=cluster_name
+                self.crush_weight=float(osd_object.crush_weight)
+                self.mount=str(osd_object.lv_name)
+                #action="logging info"
+                #wait_reason="None"
+                self.osd=osd_object
+
                 break
 
         #This may need to be changed. According to Andras' instructions, if a corresponding OSD object is not found then we should not create or update a case. There is a check for this condition in the 'save' method and that is why we return the value of 'found_osd_equivalent'.
         if found_osd_equivalent == False:
-            case.osd = cc.CephOsd(case.osd_id)
-        return case, found_osd_equivalent
+            #case.osd = cc.CephOsd(case.osd_id)
+            print("Unable to find an equivalent OSD in the OSD map. Exiting...")
+            sys.exit(1)
+        return found_osd_equivalent
 
     #This validates the case by checking that osd_id is an int and is positive and that crush weight is positive.
     def _validate_case(self):
@@ -198,53 +243,54 @@ class DlcCase:
     #This * means that any arguments after it will not be positional and will be supplied as keyword arguments
     def save(self, *, new_version: bool = False, force_save: bool = False):
 
-        case = self
+        found_osd_equivalent = False
 
-        #if disk and hostname return value is 1, osd_id and cluster return value is 2. If all 4 are present, return value is 3
-        #I took out cluster from the list of available arguments for an operator, I can put this back when it is appropriate. For now, assuming that the cluster name is the same as that which is listed under the local /etc/ceph/ceph_cluster
         valid_case = self.valid_case()
-
         if valid_case:
             pass
         else:
-            print("In order to save a case you must provide either an osd id or a block device and hostname. Exiting...")
+            print("In order to save a case you must provide either an osd id or a block device AND hostname. Exiting...")
             sys.exit(1)
 
-        #if self.state == "NEW" and found_osd_equivalent:
-        case, found_osd_equivalent = self.get_complete_information(valid_case)
-        #case.state = "NEW-DETAILS"
-        #_ , found_osd_equivalent = self.get_complete_information(valid_case)
+        if not force_save:
+            #if disk and hostname return value is 1, osd_id and cluster return value is 2. If all 4 are present, return value is 3
+            #I took out cluster from the list of available arguments for an operator, I can put this back when it is appropriate. For now, assuming that the cluster name is the same as that which is listed under the local /etc/ceph/ceph_cluster
 
-        try:
-            self._validate_case()
-        except ValueError as e:
-            print(e)
-            sys.exit(1)
+            #if self.state == "NEW" and found_osd_equivalent:
+            found_osd_equivalent = self.get_complete_information(valid_case)
+            #case.state = "NEW-DETAILS"
+            #_ , found_osd_equivalent = self.get_complete_information(valid_case)
+
+            try:
+                self._validate_case()
+            except ValueError as e:
+                print(e)
+                sys.exit(1)
 
         #Here we're going to save if we found an OSD candidate in the OSD map or if the user is forcing us to try.
         if force_save == True or found_osd_equivalent == True:
             with db_cursor() as cur:
                 data = {
-                    "hostname": case.hostname,
-                    "state": case.state,
-                    "block_dev": case.block_dev,
-                    "osd_id": case.osd_id,
-                    "cluster": case.cluster,
-                    "crush_weight": case.crush_weight,
-                    "mount": case.mount,
-                    "active": case.active,
-                    "action": case.action,
-                    "wait_reason": case.wait_reason
+                    "hostname": self.hostname,
+                    "state": self.state,
+                    "block_dev": self.block_dev,
+                    "osd_id": self.osd_id,
+                    "cluster": self.cluster,
+                    "crush_weight": self.crush_weight,
+                    "mount": self.mount,
+                    "active": self.active,
+                    "action": self.action,
+                    "wait_reason": self.wait_reason
                 }
 
                 if new_version:
                     #save history
                     print("Going into history to save...")
-                    save_case_history(case.case_id)
+                    save_case_history(self.case_id)
                     set_clause = ", ".join([f"{key} = :{key}" for key in data.keys()])
                     cur.execute(
                         f"UPDATE {TABLE_NAME} SET {set_clause} WHERE case_id = :case_id",
-                        {**data, "case_id": case.case_id},
+                        {**data, "case_id": self.case_id},
                     )
                 else:
                     columns = ", ".join(data.keys())
@@ -253,9 +299,9 @@ class DlcCase:
                         f"INSERT INTO {TABLE_NAME} ({columns}) VALUES ({placeholders})",
                         data,
                     )
-                    case.case_id = cur.lastrowid
+                    self.case_id = cur.lastrowid
 
-            return case
+            return self
 
         else:
             print("Did not find an equivalent OSD in the OSD map and force_save=False, so nothing was saved.")
@@ -286,8 +332,9 @@ class DlcCase:
 
     def progress(self):
 
-        if self.state == "NEW-DETAILS":
+        if self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
             case, found_osd_equivalent = self.get_complete_information(3)
+            #Do some operations depending on the state. For example, for self.state == State.RECOVERY_DONE:
             #Check OSD properties... if it seems like a normal OSD found_osd_equivalent == True
             #Then we're going to do things like:
 
@@ -307,10 +354,19 @@ class DlcCase:
             #ceph_admin.osd_remove already has all the commands but doesn't wait for cluster health after taking the OSD out. So, need to either rewrite that code or just paste parts of it here.
             #Then progress to state "RECOVERY_WAIT"
             #in ceph_common there is a class called CephState and there is a method called is_clean
-            self.state = "RECOVERY_WAIT"
             #state = cc.CephState()
             #state.is_clean() returns True or False
             #
+            #NOW if all conditions cleared:
+            for state in self.valid_transitions[self.state]:
+                if state != State.OPERATOR_NEEDED:
+                    self.transition_to(state)
+                
+            #Otherwise, if something went wrong:
+            self.transition_to(State.OPERATOR_NEEDED)
+
+                
+
 
     # convenience
     def as_row(self):
