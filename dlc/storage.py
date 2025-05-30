@@ -19,6 +19,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     case_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     hostname         TEXT DEFAULT NULL,
+    host_serial      TEXT DEFAULT NULL,
+    smart_passed     TEXT DEFAULT NULL,
     state            TEXT NOT NULL,
     block_dev        TEXT DEFAULT NULL,
     osd_id           INTEGER DEFAULT NULL,
@@ -40,7 +42,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_osdcluster
 
 CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} (
     case_id          INTEGER NOT NULL,
-    hostname         TEXT DEFAULT None,
+    hostname         TEXT DEFAULT NULL,
+    host_serial      TEXT DEFAULT NULL,
+    smart_passed     TEXT DEFAULT NULL,
     state            TEXT NOT NULL,
     block_dev        TEXT DEFAULT NULL,
     osd_id           INTEGER DEFAULT NULL,
@@ -71,4 +75,4 @@ def db_cursor():
     finally:
         conn.close()
 
-#_open_conn()
+_open_conn()

@@ -2,6 +2,8 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 from typing import Optional
 import sys
+import json
+import subprocess
 from storage import db_cursor
 #ceph-util import
 import ceph_common as cc
@@ -68,6 +70,8 @@ class DlcCase:
             mount: Optional[str] = None,
             active: int = 1, 
             osd: Optional[cc.CephOsd] = None,
+            host_serial = None,
+            smart_passed = None,
             ):
         self.case_id = case_id
         self.hostname = hostname
@@ -81,6 +85,8 @@ class DlcCase:
         self.mount = mount
         self.active = active
         self.osd = osd
+        self.host_serial = host_serial
+        self.smart_passed = smart_passed
 
         #Dict for valid transitions
         self.valid_transitions = {
@@ -184,7 +190,6 @@ class DlcCase:
         #Here we're asserting that the dict is non-empty. There are other sections of the code that do this implicitly but here we do it explicitly just in case something was missed.
         assert object_kwargs
 
-
         hw = hwinv.HWInv()  
         OsdMap = cc.CephOsdMap(hw)
 
@@ -235,6 +240,18 @@ class DlcCase:
             #case.osd = cc.CephOsd(case.osd_id)
             print("Unable to find an equivalent OSD in the OSD map. Exiting...")
             sys.exit(1)
+
+        
+        #print(self.smart_passed, self.host_serial)
+        if self.smart_passed is None:
+            #print("IN THE IF STATEMENT")
+            self.check_SMART()
+        if self.host_serial is None:
+            self.host_serial = hw.dmidecode().sysinfo['system']['serial']
+        elif self.host_serial != hw.dmidecode().sysinfo['system']['serial']:
+            print("This host's serial number doesn't match the serial number saved in this case (case id: {self.case_id}). Exiting...")
+            sys.exit(1)
+
         return found_osd_equivalent
 
     #This validates the case by checking that osd_id is an int and is positive and that crush weight is positive.
@@ -293,7 +310,9 @@ class DlcCase:
                     "mount": self.mount,
                     "active": self.active,
                     "action": self.action,
-                    "wait_reason": self.wait_reason
+                    "wait_reason": self.wait_reason,
+                    "smart_passed": self.smart_passed,
+                    "host_serial": self.host_serial
                 }
 
                 if new_version:
@@ -342,9 +361,150 @@ class DlcCase:
             row_dict.pop("active", None)
             #print(DlcCase)
             return DlcCase(**row_dict)
-
+    
+    #Right now this method should only be called from 'load' because it calls 'get_complete_information' which likely rewrites case information
     def progress(self, *, new_version = True) -> "DlcCase":
 
+        if self.state == State.NEW:
+            self.state = State.NEW_DETAIL
+            #print(self.state)
+            return self.save(new_version = new_version)
+        
+        found_osd_equivalent = self.get_complete_information(self.valid_case())
+
+        cluster_name, e = self._check_ceph_cluster()
+
+        if cluster_name:
+            pass
+        else:
+            print(e)
+            exit(1)
+
+        if found_osd_equivalent and cluster_name == self.cluster:
+        
+            if self.state == State.NEW_DETAIL:
+                try:
+                    self.prep_OSD_for_removal()
+                except Exception as e:
+                    print("Unhandled Exception was encountered while prepping OSD for removal (state is NEW-DETAIL)")
+                    print(e)
+                    self.state = State.OPERATOR_NEEDED
+                    self.save(new_version = True)
+                
+                return self.save(new_version = new_version)
+
+            if self.state == State.RECOVERY_WAIT:
+                #wait for recovery, if false print that we're still waiting and will do nothing for now
+                #in ceph_common there is a class called CephState and there is a method called is_clean
+                cluster_state = cc.CephState()
+                if cluster_state.is_clean():
+                    #print("Ceph health check passed, will continute to OSD removal.")
+                    self.state = State.RECOVERY_DONE
+                    self.save(new_version = new_version)
+                    self.remove_OSD()
+                else:
+                    print("Ceph health check failed. Won't do anything for now... Exiting.")
+                    sys.exit()
+            
+            elif self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
+                #Do some operations depending on the state. For example, for self.state == State.RECOVERY_DONE:
+                #Check OSD properties... if it seems like a normal OSD found_osd_equivalent == True
+                #Then we're going to do things like:
+
+                #1. Ensure Daemon is stopped
+                
+                #2. Check and  Change CRUSH weight to 0
+                #self.crush_weight = 0
+                
+                #3. Put OSD and other info into database
+                #self.save(new_version = True)
+                
+                #4. Watch for Ceph recovery
+                #Here if ceph doesn't report health ok then we stop until this program again scans for active cases that need updating or a user manually activates an update for the case
+
+                #5. Remove OSD and prep for testing or replacement
+                
+                #ceph_admin.osd_remove already has all the commands but doesn't wait for cluster health after taking the OSD out. So, need to either rewrite that code or just paste parts of it here.
+                #
+                #NOW if all conditions cleared:
+                for state in self.valid_transitions[self.state]:
+                    if state != State.OPERATOR_NEEDED:
+                        self.transition_to(state)
+                    
+                return self.save(new_version = new_version)
+                #Otherwise, if something went wrong (for now assuming everything is right):
+                #self.transition_to(State.OPERATOR_NEEDED)
+            else:
+                return None
+
+        else:
+            print("Tried to progress from {self.state} but this cluster doesn't match the case's saved cluster. Exiting...")
+            sys.exit(1)
+
+    def check_SMART(self):
+
+        if not self.block_dev.startswith('/dev/'):
+            full_device_path = '/dev/' + str(self.block_dev)
+            cmd = ["/usr/sbin/smartctl","-a", "-j", f"{full_device_path}"]
+        else:
+            cmd = ["/usr/sbin/smartctl","-a", "-j", f"{self.block_dev}"]
+
+        #cmd = ["/usr/sbin/smartctl","-a", "-j", f"{self.block_dev}"]
+
+        try:
+            R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, check=True)
+        except FileNotFoundError as notFound:
+            print(notFound)
+        except subprocess.CalledProcessError as e:
+            json_err = json.loads(e.stdout.decode())
+            print(json_err['smartctl']['messages'][0]['string'])
+
+        #print(json.loads(R.stdout.decode())['smart_status']['passed'])
+        self.smart_passed = json.loads(R.stdout.decode())['smart_status']['passed']
+        
+        #print(R)
+
+    def prep_OSD_for_removal(self):
+
+        #Putting this here because the current OSD removal method doesn't include reweighting CRUSH weight to 0 and because it doesn't include waiting for backfilling after taking the OSD from in to out.
+        cmd_list = []
+        all_passed = False
+
+        #stop the OSD process
+        cmd_list.append([ 'systemctl', 'stop', 'ceph-osd@{}'.format(self.osd_id) ])
+
+        #Reweight CRUSH weight to 0
+        cmd_list.append(['ceph', 'osd', 'crush', 'reweight', 'osd.{}'.format(self.osd_id), '0'])
+
+        #mark the OSD Out
+        cmd_list.append(['ceph', 'osd', 'out', 'osd.{}'.format(self.osd_id)])
+
+        for cmd in cmd_list:
+            print(cmd)
+            '''
+            try:
+                R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, check=True)
+            except FileNotFoundError as notFound:
+                print(notFound)
+                self.state = State.OPERATOR_NEEDED
+                self.save(new_version = True)
+                sys.exit(1)
+            except subprocess.CalledProcessError as e:
+                print(e.stdout.decode())
+                print(e.stderr.decode())
+                print("Something went wrong during OSD removal prep")
+                self.state = State.OPERATOR_NEEDED
+                self.save(new_version = True)
+                sys.exit(1)
+            '''
+
+
+        #update case state and save if everything went well:
+        self.state = State.RECOVERY_WAIT
+
+    def remove_OSD(self):
+
+        #BEFORE doing any operations on the cluster or node, we need to make sure that the node and cluster we're working on match the details of the case. We may not be doing that at this point
         if self.state == State.RECOVERY_DONE:
             print("Recovery is done, moving to osd removal testing...")
             found_osd_equivalent = self.get_complete_information(self.valid_case())
@@ -366,46 +526,8 @@ class DlcCase:
             #print(args.dry_run)
 
             cadmin.osd_remove(self.osd, args) 
-            return None
-        elif self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
-            found_osd_equivalent = self.get_complete_information(self.valid_case())
-            #Do some operations depending on the state. For example, for self.state == State.RECOVERY_DONE:
-            #Check OSD properties... if it seems like a normal OSD found_osd_equivalent == True
-            #Then we're going to do things like:
-
-            #1. Ensure Daemon is stopped
-            
-            #2. Check and  Change CRUSH weight to 0
-            #self.crush_weight = 0
-            
-            #3. Put OSD and other info into database
-            #self.save(new_version = True)
-            
-            #4. Watch for Ceph recovery
-            #Here if ceph doesn't report health ok then we stop until this program again scans for active cases that need updating or a user manually activates an update for the case
-
-            #5. Remove OSD and prep for testing or replacement
-            
-            #ceph_admin.osd_remove already has all the commands but doesn't wait for cluster health after taking the OSD out. So, need to either rewrite that code or just paste parts of it here.
-            #Then progress to state "RECOVERY_WAIT"
-            #in ceph_common there is a class called CephState and there is a method called is_clean
-            #state = cc.CephState()
-            #state.is_clean() returns True or False
-            #
-            #NOW if all conditions cleared:
-            for state in self.valid_transitions[self.state]:
-                if state != State.OPERATOR_NEEDED:
-                    self.transition_to(state)
-                
-            return_this_case = self.save(new_version)
-            #Otherwise, if something went wrong (for now assuming everything is right):
-            #self.transition_to(State.OPERATOR_NEEDED)
-            return return_this_case
-        else:
-            return None
-
-                
-
+            self.state = State.OSD_REMOVED
+            return self.save(new_version = True)
 
     # convenience
     def as_row(self):
