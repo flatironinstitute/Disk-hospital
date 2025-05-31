@@ -220,7 +220,7 @@ class DlcCase:
 
             #Here we are instantiating a DlcCase object if we find an OSD in the local portion of the OSD Map. This needs to be changed so that we look at the whole map when the state is "NEW", and look at the local portion if the case is in any other state.
             if found_osd_equivalent:
-                print("Found an equivalent OSD in the OSD Map.")
+                print("Found an equivalent OSD in the OSD Map. Plugging in OSD data into the case. This overwrites runtime data pulled from the database!")
                 
                 self.hostname=str(osd_object.hostname)
                 self.block_dev=str(osd_object.dev_name)
@@ -240,13 +240,13 @@ class DlcCase:
             #case.osd = cc.CephOsd(case.osd_id)
             print("Unable to find an equivalent OSD in the OSD map. Exiting...")
             sys.exit(1)
-
         
         #print(self.smart_passed, self.host_serial)
-        if self.smart_passed is None:
-            #print("IN THE IF STATEMENT")
+        if self.smart_passed is None and self.state != State.NEW:
+            print("Checking SMART status...")
             self.check_SMART()
-        if self.host_serial is None:
+        if self.host_serial is None and self.state != State.NEW:
+            print("Checking Host serial...")
             self.host_serial = hw.dmidecode().sysinfo['system']['serial']
         elif self.host_serial != hw.dmidecode().sysinfo['system']['serial']:
             print("This host's serial number doesn't match the serial number saved in this case (case id: {self.case_id}). Exiting...")
@@ -471,18 +471,18 @@ class DlcCase:
         all_passed = False
 
         #stop the OSD process
-        cmd_list.append([ 'systemctl', 'stop', 'ceph-osd@{}'.format(self.osd_id) ])
+        cmd_list.append([ 'echo', 'systemctl', 'stop', 'ceph-osd@{}'.format(self.osd_id) ])
 
         #Reweight CRUSH weight to 0
-        cmd_list.append(['ceph', 'osd', 'crush', 'reweight', 'osd.{}'.format(self.osd_id), '0'])
+        cmd_list.append([ 'echo', 'ceph', 'osd', 'crush', 'reweight', 'osd.{}'.format(self.osd_id), '0' ])
 
         #mark the OSD Out
-        cmd_list.append(['ceph', 'osd', 'out', 'osd.{}'.format(self.osd_id)])
+        cmd_list.append([ 'echo', 'ceph', 'osd', 'out', 'osd.{}'.format(self.osd_id) ])
 
         for cmd in cmd_list:
-            print(cmd)
-            '''
+            
             try:
+                #stdout&stdin= subprocess.PIPE opens a pipe to the standard stream that allows stdout and stderr to be captured and stored in the returned object (CompletedProcess) attributes ob.stdout and ob.stdin. check=True indicates that if the return code is non-zero, an exception of type CalleddProcessError should be returned. 
                 R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, check=True)
             except FileNotFoundError as notFound:
                 print(notFound)
@@ -496,7 +496,9 @@ class DlcCase:
                 self.state = State.OPERATOR_NEEDED
                 self.save(new_version = True)
                 sys.exit(1)
-            '''
+
+            print(R.stdout.decode())
+            
 
 
         #update case state and save if everything went well:
