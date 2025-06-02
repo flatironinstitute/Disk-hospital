@@ -118,9 +118,9 @@ class DlcCase:
        
         elif self.state == State.NEW:
             try:
-                self.save(force_save = True)
+                self.save()
             except sqlite3.IntegrityError as e:
-                print(self.block_dev, self.hostname)
+                print(self.osd_id, self.block_dev, self.hostname)
                 print(e)
                 sys.exit(1)
             
@@ -139,34 +139,6 @@ class DlcCase:
                     f"Case cannot transition from {self.state} to {new_state}"
                     )
 
-# ---------- DB helpers ----------
-    #This doesn't need an automatic argument such as self or cls. It's a standalone helper function that is here for organizational purposes. @staticmethod is an indicator that this is the case. The underscore at the beginning means that this is a private functions to be used only within the class
-    """
-    @staticmethod
-    def _next_case_id(cur):
-        cur.execute(f"SELECT COALESCE(MAX(case_id), 0) + 1 FROM {TABLE_NAME}")
-        return cur.fetchone()[0]
-    """
-
-    def valid_case(self):
-        id_and_cluster = 0
-        disk_and_hostname = 0
-        
-        #Took cluster out and will put back when it is deemed appropriate
-        #if self.osd_id and self.cluster and self.osd_id >= 0:
-        if self.osd_id and self.osd_id >= 0:
-            id_and_cluster += 1
-        if self.hostname and self.block_dev:
-            disk_and_hostname += 1
-        
-        if disk_and_hostname < 1 and id_and_cluster < 1:
-            return False
-        elif disk_and_hostname == 1 and id_and_cluster == 1:
-            return 3
-        elif disk_and_hostname == 1:
-            return 1
-        elif id_and_cluster == 1:
-            return 2
 
     def _check_ceph_cluster(self):
         try:
@@ -176,83 +148,54 @@ class DlcCase:
         except FileNotFoundError as e:
             return False, e
 
-    def get_complete_information(self, valid_case):
 
-        #case = self
+    def get_complete_information(self) -> bool:
 
-        #This is a way to create a dictionary out of merged dictionaries. What this says is 'object_kwargs' is my end product (the dictionary object I will use later). So build me a dictionary called 'object_kwargs' out of merged unpacked dicts. Merge the key value pairs if the condition is true, otherwise merge an empty dictionary. 
-        object_kwargs = {
-                **({"hostname": self.hostname} if valid_case == 1 or valid_case == 3 else {}),
-                **({"dev_name": self.block_dev} if valid_case == 1 or valid_case == 3 else {}),
-                **({"osd_id": self.osd_id} if valid_case == 2 or valid_case == 3 else {}),
-                #**({"cluster": self.cluster} if valid_case == 2 or valid_case == 3 else {}),
-            }
-        #Here we're asserting that the dict is non-empty. There are other sections of the code that do this implicitly but here we do it explicitly just in case something was missed.
-        assert object_kwargs
+        if (self.osd_id is None) and (self.hostname is None or self.block_dev is None):
+            raise Exception ("Enter either a valid OSD id or a valid combination of hostname and device name. Inputs provided:  OSD ID: {}, Hostname: {}, Block device: {}".format(self.osd_id, self.hostname, self.block_dev))
 
         hw = hwinv.HWInv()  
         OsdMap = cc.CephOsdMap(hw)
 
-        if self.state == "NEW":
+        if self.state == State.NEW:
             osd_map = OsdMap.osd_map
         else:
+            if self.hostname != hw.hostname:
+                raise Exception ("The case's stored hostname does not match the current host. Cannot proceed with case on this node. Case hostname: {}, This host: {}".format(self.hostname, hw.hostname))
             osd_map = OsdMap.osd_map_local
 
-        #Here we are iterating through the Osd Map and trying to find a matching CephOsd object
-        for osd_id, osd_object in osd_map.items():
+        valid_OSD = None
 
-            #all() https://docs.python.org/3/library/functions.html#all is a built-in function which expresses that all conditions must be met. Returns True or False and takes an iterable, equivalent to:
-            """
-            def all(iterable):
-                for element in iterable:
-                    if not element:
-                    return False
-                return True
-            """
-            #getattr(object, name, default) https://docs.python.org/3/library/functions.html#getattr Returns the value of the named attribute of an object. The name must be a string, if a default return value is not provided and the named attribute doesn't exist, an AttributeError is raised.
-            #So this says return True if ALL attribute values in CephOsd are equivalent to their corresponding dictionary values in object_kwargs, otherwise return False.
-            found_osd_equivalent = all(
-                getattr(osd_object, key) == value
-                for key, value in object_kwargs.items()
-                #Currently omitting cluster as CephOsd object doesn't include it but we can add it back
-                if key != 'cluster'
-            )
+        if self.osd_id != None and int(self.osd_id) in osd_map:
+            valid_OSD = osd_map[self.osd_id] 
+        else:
+            for osd_id, osd_object in osd_map.items():
+                if self.hostname == osd_object.hostname and self.block_dev == osd_object.dev_name:
+                    valid_OSD = osd_object
 
-            #Here we are instantiating a DlcCase object if we find an OSD in the local portion of the OSD Map. This needs to be changed so that we look at the whole map when the state is "NEW", and look at the local portion if the case is in any other state.
-            if found_osd_equivalent:
-                print("Found an equivalent OSD in the OSD Map. Plugging in OSD data into the case. This overwrites runtime data pulled from the database!")
-                
-                self.hostname=str(osd_object.hostname)
-                self.block_dev=str(osd_object.dev_name)
-                self.osd_id=int(osd_object.osd_id)
-                #cluster name from local host instead of cluster fsid from CephOsd
-                #self.cluster=cluster_name
-                self.crush_weight=float(osd_object.crush_weight)
-                self.mount=str(osd_object.lv_name)
-                #action="logging info"
-                #wait_reason=None
-                self.osd=osd_object
+        if valid_OSD:
+            print("Found an equivalent OSD in the OSD Map. Plugging in OSD data into the case. This overwrites runtime data pulled from the database!")
+            
+            self.hostname = str(valid_OSD.hostname)
+            self.block_dev = str(valid_OSD.dev_name) if self.state != State.NEW else None
+            self.osd_id = int(valid_OSD.osd_id)
+            self.crush_weight = float(valid_OSD.crush_weight)
+            self.mount = str(valid_OSD.lv_name) if self.state != State.NEW else None
+            self.osd = valid_OSD if self.state != State.NEW else None
+        else:
+            raise Exception ("No valid OSD object found for the inputs provided: OSD ID: {}, Hostname: {}, Block device: {}".format(self.osd_id, self.hostname, self.block_dev)) 
 
-                break
-
-        #This may need to be changed. According to Andras' instructions, if a corresponding OSD object is not found then we should not create or update a case. There is a check for this condition in the 'save' method and that is why we return the value of 'found_osd_equivalent'.
-        if found_osd_equivalent == False:
-            #case.osd = cc.CephOsd(case.osd_id)
-            print("Unable to find an equivalent OSD in the OSD map. Exiting...")
-            sys.exit(1)
-        
-        #print(self.smart_passed, self.host_serial)
         if self.smart_passed is None and self.state != State.NEW:
             print("Checking SMART status...")
             self.check_SMART()
         if self.host_serial is None and self.state != State.NEW:
             print("Checking Host serial...")
             self.host_serial = hw.dmidecode().sysinfo['system']['serial']
-        elif self.host_serial != hw.dmidecode().sysinfo['system']['serial']:
-            print("This host's serial number doesn't match the serial number saved in this case (case id: {self.case_id}). Exiting...")
-            sys.exit(1)
+        elif self.host_serial is not None and self.host_serial != hw.dmidecode().sysinfo['system']['serial']:
+            raise Exception ("This host's serial number doesn't match the serial number saved in this case (case id: {self.case_id}). Exiting...")
 
-        return found_osd_equivalent
+        return True
+
 
     #This validates the case by checking that osd_id is an int and is positive and that crush weight is positive.
     def _validate_case(self):
@@ -261,17 +204,11 @@ class DlcCase:
             raise ValueError("crush weight must be ≥ 0")
         return True
 
+
     #This * means that any arguments after it will not be positional and will be supplied as keyword arguments
     def save(self, *, new_version: bool = False, force_save: bool = False):
 
         found_osd_equivalent = False
-
-        valid_case = self.valid_case()
-        if valid_case:
-            pass
-        else:
-            print("In order to save a case you must provide either an osd id or a block device AND hostname. Exiting...")
-            sys.exit(1)
 
         #Here we try to find the cluster name by looking under /etc/ceph/ceph_cluster
         cluster_name, e = self._check_ceph_cluster()
@@ -283,19 +220,15 @@ class DlcCase:
             exit(1)
 
         if not force_save:
-            #if disk and hostname return value is 1, osd_id and cluster return value is 2. If all 4 are present, return value is 3
             #I took out cluster from the list of available arguments for an operator, I can put this back when it is appropriate. For now, assuming that the cluster name is the same as that which is listed under the local /etc/ceph/ceph_cluster
 
-            #if self.state == "NEW" and found_osd_equivalent:
-            found_osd_equivalent = self.get_complete_information(valid_case)
-            #case.state = "NEW-DETAILS"
-            #_ , found_osd_equivalent = self.get_complete_information(valid_case)
+            found_osd_equivalent = self.get_complete_information()
 
             try:
                 self._validate_case()
             except ValueError as e:
                 print(e)
-                sys.exit(1)
+                #sys.exit(1)
 
         #Here we're going to save if we found an OSD candidate in the OSD map or if the user is forcing us to try.
         if force_save == True or found_osd_equivalent == True:
@@ -339,6 +272,7 @@ class DlcCase:
             print("Did not find an equivalent OSD in the OSD map and force_save=False, so nothing was saved.")
             return False
 
+
     @staticmethod
     def load(case_id: int, version: Optional[int] = None) -> "DlcCase":
         sql = f"SELECT * FROM {TABLE_NAME} WHERE case_id=? "
@@ -362,6 +296,7 @@ class DlcCase:
             #print(DlcCase)
             return DlcCase(**row_dict)
     
+
     #Right now this method should only be called from 'load' because it calls 'get_complete_information' which likely rewrites case information
     def progress(self, *, new_version = True) -> "DlcCase":
 
@@ -370,7 +305,7 @@ class DlcCase:
             #print(self.state)
             return self.save(new_version = new_version)
         
-        found_osd_equivalent = self.get_complete_information(self.valid_case())
+        found_osd_equivalent = self.get_complete_information()
 
         cluster_name, e = self._check_ceph_cluster()
 
@@ -441,6 +376,7 @@ class DlcCase:
             print("Tried to progress from {self.state} but this cluster doesn't match the case's saved cluster. Exiting...")
             sys.exit(1)
 
+    
     def check_SMART(self):
 
         if not self.block_dev.startswith('/dev/'):
@@ -448,8 +384,6 @@ class DlcCase:
             cmd = ["/usr/sbin/smartctl","-a", "-j", f"{full_device_path}"]
         else:
             cmd = ["/usr/sbin/smartctl","-a", "-j", f"{self.block_dev}"]
-
-        #cmd = ["/usr/sbin/smartctl","-a", "-j", f"{self.block_dev}"]
 
         try:
             R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, check=True)
@@ -459,11 +393,9 @@ class DlcCase:
             json_err = json.loads(e.stdout.decode())
             print(json_err['smartctl']['messages'][0]['string'])
 
-        #print(json.loads(R.stdout.decode())['smart_status']['passed'])
         self.smart_passed = json.loads(R.stdout.decode())['smart_status']['passed']
         
-        #print(R)
-
+    
     def prep_OSD_for_removal(self):
 
         #Putting this here because the current OSD removal method doesn't include reweighting CRUSH weight to 0 and because it doesn't include waiting for backfilling after taking the OSD from in to out.
@@ -499,17 +431,16 @@ class DlcCase:
 
             print(R.stdout.decode())
             
-
-
         #update case state and save if everything went well:
         self.state = State.RECOVERY_WAIT
 
+    
     def remove_OSD(self):
 
         #BEFORE doing any operations on the cluster or node, we need to make sure that the node and cluster we're working on match the details of the case. We may not be doing that at this point
         if self.state == State.RECOVERY_DONE:
             print("Recovery is done, moving to osd removal testing...")
-            found_osd_equivalent = self.get_complete_information(self.valid_case())
+            found_osd_equivalent = self.get_complete_information()
             class args:
                 def __init__( self,
                         replace = True,
@@ -530,6 +461,7 @@ class DlcCase:
             cadmin.osd_remove(self.osd, args) 
             self.state = State.OSD_REMOVED
             return self.save(new_version = True)
+
 
     # convenience
     def as_row(self):
