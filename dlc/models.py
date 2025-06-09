@@ -304,7 +304,7 @@ class DlcCase:
             self.state = State.NEW_DETAIL
             #print(self.state)
             return self.save(new_version = new_version)
-        
+       
         found_osd_equivalent = self.get_complete_information()
 
         cluster_name, e = self._check_ceph_cluster()
@@ -329,6 +329,7 @@ class DlcCase:
                 return self.save(new_version = new_version)
 
             if self.state == State.RECOVERY_WAIT:
+
                 #wait for recovery, if false print that we're still waiting and will do nothing for now
                 #in ceph_common there is a class called CephState and there is a method called is_clean
                 cluster_state = cc.CephState()
@@ -337,11 +338,13 @@ class DlcCase:
                     self.state = State.RECOVERY_DONE
                     self.save(new_version = new_version)
                     self.remove_OSD()
+                
                 else:
                     print("Ceph health check failed. Won't do anything for now... Exiting.")
                     sys.exit()
             
-            elif self.state != State.OSD_REMOVED != self.state != State.TEST_DONE:
+            elif self.state != State.OSD_REMOVED and self.state != State.TEST_DONE:
+                
                 #Do some operations depending on the state. For example, for self.state == State.RECOVERY_DONE:
                 #Check OSD properties... if it seems like a normal OSD found_osd_equivalent == True
                 #Then we're going to do things like:
@@ -361,12 +364,14 @@ class DlcCase:
                 
                 #ceph_admin.osd_remove already has all the commands but doesn't wait for cluster health after taking the OSD out. So, need to either rewrite that code or just paste parts of it here.
                 #
+                
                 #NOW if all conditions cleared:
                 for state in self.valid_transitions[self.state]:
                     if state != State.OPERATOR_NEEDED:
                         self.transition_to(state)
                     
                 return self.save(new_version = new_version)
+                
                 #Otherwise, if something went wrong (for now assuming everything is right):
                 #self.transition_to(State.OPERATOR_NEEDED)
             else:
@@ -379,21 +384,47 @@ class DlcCase:
     
     def check_SMART(self):
 
+        if not self.block_dev:
+            raise Exception ("Block device isn't recognized. Block device: {}".format(self.block_dev))
         if not self.block_dev.startswith('/dev/'):
             full_device_path = '/dev/' + str(self.block_dev)
             cmd = ["/usr/sbin/smartctl","-a", "-j", f"{full_device_path}"]
         else:
             cmd = ["/usr/sbin/smartctl","-a", "-j", f"{self.block_dev}"]
 
-        try:
-            R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, check=True)
-        except FileNotFoundError as notFound:
-            print(notFound)
-        except subprocess.CalledProcessError as e:
-            json_err = json.loads(e.stdout.decode())
-            print(json_err['smartctl']['messages'][0]['string'])
+        R = subprocess.run(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
 
-        self.smart_passed = json.loads(R.stdout.decode())['smart_status']['passed']
+        json_result = json.loads(R.stdout.decode())
+
+        return_code = json_result['smartctl']['exit_status']
+        mask_list = [1, 2, 4, 8]
+        active_bits = [((return_code and mask) and 1) for mask in mask_list]
+        #print(active_bits)
+        #print(max(active_bits))
+        err_message = None
+
+        #return code 0
+        if max(active_bits) == 0:
+            self.smart_passed = json_result['smart_status']['passed']
+
+        #return code 3 (disk failed)
+        elif active_bits[2]:
+            self.smart_passed = json_result['smart_status']['passed']
+            err_message = json_result['smart_status']['scsi']['ie_string']
+
+        #return code 1 or 2
+        elif active_bits[0] or active_bits[1]:
+            raise Exception(json_result['smartctl']['messages'][0]['string'])
+        
+        #Any return code other than 0, 1, 2, or 3.
+        else:
+            self.smart_passed = json_result['smart_status']['passed']
+            err_message = json_result['smart_status']['scsi']['ie_string']
+
+        if err_message is not None:
+            print("DlcCase({}).progress_NEW - SMART message: {}".format(self.case_id, err_message)) 
+            
+            print("DlcCase({}).progress_NEW - populating SMART Health passed:{}. smartctl return code: {}".format(self.case_id, self.smart_passed, json_result['smartctl']['exit_status']))
         
     
     def prep_OSD_for_removal(self):

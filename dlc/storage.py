@@ -75,4 +75,4 @@ def db_cursor():
     finally:
         conn.close()
 
-_open_conn()
+#_open_conn()
